@@ -19,18 +19,24 @@ State persistence — Pattern 3:
   in the DB, not memory.
 """
 import asyncio
+import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any
 
 import structlog
 from google.adk.runners import InMemoryRunner
-from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.orchestrator import build_root_agent
+from app.agents.orchestrator import (
+    account_agent,
+    build_root_agent,
+    escalation_agent,
+    knowledge_agent,
+)
 from app.agents.tools.guardrails import is_out_of_scope, redact_pii
 from app.api.errors import SessionNotFoundError, UpstreamTimeoutError
 from app.db.models import AgentTrace, Message, Session, Ticket
@@ -45,6 +51,66 @@ class PipelineResult:
     content: str
     routed_to: str
     trace_id: str
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Recursively convert arbitrary tool outputs into JSON-serializable values."""
+    if is_dataclass(value):
+        return _to_jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, tuple):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+async def _run_specialist_agent(user_id: str, user_message: str, agent) -> tuple[str, list[dict]]:
+    """
+    Execute a specialist agent directly and capture tool call metadata.
+
+    Used as a fallback when the root agent returns literal tool-call text
+    instead of invoking tools through ADK events.
+    """
+    runner = InMemoryRunner(agent=agent, app_name="helix_srop")
+    adk_session = await runner.session_service.create_session(
+        app_name="helix_srop",
+        user_id=user_id,
+    )
+    new_message = Content(role="user", parts=[Part(text=user_message)])
+
+    final_text: str = ""
+    tool_calls: list[dict] = []
+
+    async for event in runner.run_async(
+        user_id=user_id,
+        session_id=adk_session.id,
+        new_message=new_message,
+    ):
+        for fc in (event.get_function_calls() or []):
+            tool_calls.append({
+                "tool_name": fc.name,
+                "args": dict(fc.args) if fc.args else {},
+                "result": None,
+            })
+
+        for fr in (event.get_function_responses() or []):
+            for tc in reversed(tool_calls):
+                if tc["tool_name"] == fr.name and tc["result"] is None:
+                    tc["result"] = _to_jsonable(fr.response)
+                    break
+
+        if event.is_final_response() and event.content and event.content.parts:
+            final_text = "".join(
+                p.text
+                for p in event.content.parts
+                if hasattr(p, "text") and p.text
+            )
+
+    return final_text, tool_calls
 
 
 async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineResult:
@@ -105,8 +171,10 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
     # ------------------------------------------------------------------ #
     root_agent = build_root_agent(state)
     runner = InMemoryRunner(agent=root_agent, app_name="helix_srop")
-    svc = InMemorySessionService()
-    adk_session = await svc.create_session(app_name="helix_srop", user_id=state.user_id)
+    # Use runner's own internal session service — not a separate instance
+    adk_session = await runner.session_service.create_session(
+        app_name="helix_srop", user_id=state.user_id
+    )
 
     new_message = Content(role="user", parts=[Part(text=user_message)])
 
@@ -138,11 +206,7 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
             for fr in (event.get_function_responses() or []):
                 for tc in reversed(tool_calls):
                     if tc["tool_name"] == fr.name and tc["result"] is None:
-                        tc["result"] = (
-                            fr.response
-                            if isinstance(fr.response, (str, dict, list))
-                            else str(fr.response)
-                        )
+                        tc["result"] = _to_jsonable(fr.response)
                         break
 
             # Final response — grab text and the author agent name
@@ -176,6 +240,28 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
 
     if not final_text:
         final_text = "I'm sorry, I couldn't generate a response. Please try again."
+
+    # Some models can emit literal tool-call text instead of invoking tool events.
+    # Recover by executing the requested specialist agent directly.
+    if routed_to == "smalltalk" and not tool_calls:
+        fallback = None
+        if "knowledge_agent" in final_text:
+            fallback = (knowledge_agent, "knowledge")
+        elif "account_agent" in final_text:
+            fallback = (account_agent, "account")
+        elif "escalation_agent" in final_text:
+            fallback = (escalation_agent, "escalation")
+
+        if fallback:
+            specialist_agent, routed_to = fallback
+            specialist_text, specialist_tool_calls = await _run_specialist_agent(
+                user_id=state.user_id,
+                user_message=user_message,
+                agent=specialist_agent,
+            )
+            if specialist_text:
+                final_text = specialist_text
+            tool_calls.extend(specialist_tool_calls)
 
     # E5: Redact PII from final response before storing
     final_text_redacted = redact_pii(final_text)
