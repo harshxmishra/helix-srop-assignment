@@ -1,4 +1,4 @@
-# Helix SROP — Stateful RAG Orchestration Pipeline
+# Helix SROP — Harsh Mishra
 
 An AI Support Concierge for the Helix B2B SaaS platform. Handles product knowledge questions via RAG and account queries via internal tools — in a single stateful conversation that survives process restarts.
 
