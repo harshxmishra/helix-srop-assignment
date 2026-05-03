@@ -117,15 +117,34 @@ def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> lis
     return [emb.values for emb in response.embeddings]
 
 
+# Reference docs that are not part of the Helix product corpus.
+# Excluded from ingestion by default.
+REFERENCE_DOCS = {
+    "rag-guide.md",
+    "google-adk-guide.md",
+    "fastapi-async-guide.md",
+    "ASSIGNMENT.md",
+    "README.md",
+}
+
+
 async def ingest_directory(docs_path: Path, chunk_size: int, chunk_overlap: int) -> None:
     """
     Walk docs_path, chunk and embed every .md file, upsert into vector store.
+
+    Excludes reference/guide docs (REFERENCE_DOCS) that are not part of the
+    Helix product corpus. Only product documentation is indexed.
 
     Stable chunk IDs mean re-ingesting the same file is idempotent (upsert).
     Embeddings are generated in batches of 20 to respect rate limits.
     ChromaDB's PersistentClient is synchronous — calls run in a thread.
     """
-    md_files = list(docs_path.rglob("*.md"))
+    all_md = list(docs_path.rglob("*.md"))
+    md_files = [f for f in all_md if f.name not in REFERENCE_DOCS]
+    skipped = [f.name for f in all_md if f.name in REFERENCE_DOCS]
+    if skipped:
+        print(f"Skipping reference docs: {', '.join(skipped)}")
+    print(f"Found {len(md_files)} product markdown files in {docs_path}")
     print(f"Found {len(md_files)} markdown files in {docs_path}")
 
     all_ids: list[str] = []
@@ -178,7 +197,7 @@ async def ingest_directory(docs_path: Path, chunk_size: int, chunk_overlap: int)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest docs into the vector store")
+    parser = argparse.ArgumentParser(description="Ingest product docs into the vector store")
     parser.add_argument("--path", type=Path, required=True, help="Directory containing .md files")
     parser.add_argument("--chunk-size", type=int, default=512)
     parser.add_argument("--chunk-overlap", type=int, default=64)

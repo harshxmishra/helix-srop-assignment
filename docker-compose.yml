@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist SQLite DB and ChromaDB between restarts
+      - ./helix_srop.db:/app/helix_srop.db
+      - ./chroma_db:/app/chroma_db
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - DATABASE_URL=sqlite+aiosqlite:///./helix_srop.db
+      - CHROMA_PERSIST_DIR=./chroma_db
+      - ADK_MODEL=${ADK_MODEL:-gemini-2.0-flash}
+      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-30}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
