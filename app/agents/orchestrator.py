@@ -14,6 +14,7 @@ from google.adk.agents import LlmAgent
 from google.adk.tools.agent_tool import AgentTool
 
 from app.agents.tools.account_tools import get_account_status, get_recent_builds
+from app.agents.tools.escalation_tools import create_ticket
 from app.agents.tools.search_docs import search_docs
 from app.settings import settings
 from app.srop.state import SessionState
@@ -51,6 +52,19 @@ account_agent = LlmAgent(
     tools=[get_recent_builds, get_account_status],
 )
 
+ESCALATION_INSTRUCTION = """
+You are the Helix escalation specialist.
+Handle complex issues that need human support — create tickets.
+Always use create_ticket when user requests escalation or issue is unresolvable.
+"""
+
+escalation_agent = LlmAgent(
+    name="escalation_agent",
+    model=settings.adk_model,
+    instruction=ESCALATION_INSTRUCTION,
+    tools=[create_ticket],
+)
+
 # ---------------------------------------------------------------------------
 # Root agent factory — injects per-turn session context into instruction
 # ---------------------------------------------------------------------------
@@ -64,6 +78,9 @@ Call the correct specialist tool based on the user's intent:
 
 - Their builds, account, plan tier, usage limits
   → call account_agent
+
+- "escalate", "support ticket", "talk to human", complex issues
+  → call escalation_agent
 
 - Greetings, thanks, or clearly off-topic messages
   → respond directly without calling a tool
@@ -95,5 +112,6 @@ def build_root_agent(state: SessionState) -> LlmAgent:
         tools=[
             AgentTool(agent=knowledge_agent),
             AgentTool(agent=account_agent),
+            AgentTool(agent=escalation_agent),  # E2
         ],
     )

@@ -60,3 +60,28 @@ class AgentTrace(Base):
     retrieved_chunk_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     latency_ms: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class IdempotencyKey(Base):
+    """E1: Cache responses by (session_id, idempotency_key) for replay."""
+    __tablename__ = "idempotency_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), index=True)
+    response: Mapped[dict[str, Any]] = mapped_column(JSON)  # Cached ChatResponse
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Ticket(Base):
+    """E2: Support tickets created by escalation_agent."""
+    __tablename__ = "tickets"
+
+    ticket_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(16))  # low | medium | high | urgent
+    status: Mapped[str] = mapped_column(String(16), default="open")  # open | assigned | resolved
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

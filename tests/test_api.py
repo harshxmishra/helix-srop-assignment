@@ -53,3 +53,45 @@ async def test_knowledge_query_routes_correctly(client, mock_adk):
 async def test_session_not_found_returns_404(client):
     resp = await client.post("/v1/chat/nonexistent-id", json={"content": "hello"})
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_e5_guardrails_refusal_on_out_of_scope(client):
+    """E5: Out-of-scope queries rejected with refusal message."""
+    sess = await client.post("/v1/sessions", json={"user_id": "u_guard_001"})
+    session_id = sess.json()["session_id"]
+
+    # Out-of-scope query
+    resp = await client.post(
+        f"/v1/chat/{session_id}",
+        json={"content": "write me a poem about flowers"},
+    )
+    assert resp.status_code == 200
+    assert "scope" in resp.json()["reply"].lower()
+    assert resp.json()["routed_to"] == "guardrails"
+
+
+@pytest.mark.asyncio
+async def test_e1_idempotency_key_caches_response(client, mock_adk):
+    """E1: Same Idempotency-Key returns cached response."""
+    sess = await client.post("/v1/sessions", json={"user_id": "u_idem_001"})
+    session_id = sess.json()["session_id"]
+
+    # First request with idempotency key
+    r1 = await client.post(
+        f"/v1/chat/{session_id}",
+        json={"content": "How do I rotate a deploy key?"},
+        headers={"Idempotency-Key": "test-key-001"},
+    )
+    assert r1.status_code == 200
+    trace_id_1 = r1.json()["trace_id"]
+
+    # Same request with same key — should return cached result
+    r2 = await client.post(
+        f"/v1/chat/{session_id}",
+        json={"content": "Different message (ignored)"},
+        headers={"Idempotency-Key": "test-key-001"},
+    )
+    assert r2.status_code == 200
+    # Should return same trace_id (from cache)
+    assert r2.json()["trace_id"] == trace_id_1

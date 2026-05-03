@@ -31,8 +31,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import build_root_agent
+from app.agents.tools.guardrails import is_out_of_scope, redact_pii
 from app.api.errors import SessionNotFoundError, UpstreamTimeoutError
-from app.db.models import AgentTrace, Message, Session
+from app.db.models import AgentTrace, Message, Session, Ticket
 from app.settings import settings
 from app.srop.state import SessionState
 
@@ -66,6 +67,38 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
 
     state = SessionState.from_db_dict(session.state)
     log.info("pipeline.start", session_id=session_id, turn=state.turn_count)
+
+    # ------------------------------------------------------------------ #
+    # E5: Guardrails check
+    # ------------------------------------------------------------------ #
+    if is_out_of_scope(user_message):
+        trace_id = str(uuid.uuid4())
+        latency_ms = int((time.monotonic() - start_ms) * 1000)
+        db.add(AgentTrace(
+            trace_id=trace_id,
+            session_id=session_id,
+            routed_to="guardrails",
+            tool_calls=[],
+            retrieved_chunk_ids=[],
+            latency_ms=latency_ms,
+        ))
+        db.add(Message(
+            message_id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="user",
+            content=user_message,
+            trace_id=trace_id,
+        ))
+        refusal = "I'm a Helix support assistant. I can only help with questions about our product, builds, accounts, and support. Your question is outside my scope."
+        db.add(Message(
+            message_id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="assistant",
+            content=refusal,
+            trace_id=trace_id,
+        ))
+        await db.commit()
+        return PipelineResult(content=refusal, routed_to="guardrails", trace_id=trace_id)
 
     # ------------------------------------------------------------------ #
     # 2. Build ADK agent + runner for this turn
@@ -144,6 +177,9 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
     if not final_text:
         final_text = "I'm sorry, I couldn't generate a response. Please try again."
 
+    # E5: Redact PII from final response before storing
+    final_text_redacted = redact_pii(final_text)
+
     # ------------------------------------------------------------------ #
     # 4. Extract retrieved chunk IDs from search_docs results
     # ------------------------------------------------------------------ #
@@ -156,7 +192,26 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
                         chunk_ids.append(item["chunk_id"])
 
     # ------------------------------------------------------------------ #
-    # 5. Persist trace, messages, and updated state in one commit
+    # 5. E2: Extract ticket creation from tool calls
+    # ------------------------------------------------------------------ #
+    ticket_ids: list[str] = []
+    for tc in tool_calls:
+        if tc["tool_name"] == "create_ticket":
+            result_data = tc.get("result")
+            if isinstance(result_data, dict) and "ticket_id" in result_data:
+                ticket_ids.append(result_data["ticket_id"])
+                # Write ticket to DB
+                ticket = Ticket(
+                    ticket_id=result_data["ticket_id"],
+                    session_id=session_id,
+                    user_id=state.user_id,
+                    summary=result_data.get("summary", ""),
+                    priority=result_data.get("priority", "medium"),
+                )
+                db.add(ticket)
+
+    # ------------------------------------------------------------------ #
+    # 6. Persist trace, messages, and updated state in one commit
     # ------------------------------------------------------------------ #
     trace_id = str(uuid.uuid4())
     latency_ms = int((time.monotonic() - start_ms) * 1000)
@@ -180,7 +235,7 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
         message_id=str(uuid.uuid4()),
         session_id=session_id,
         role="assistant",
-        content=final_text,
+        content=final_text_redacted,
         trace_id=trace_id,
     ))
 
@@ -198,4 +253,4 @@ async def run(session_id: str, user_message: str, db: AsyncSession) -> PipelineR
         routed_to=routed_to,
         latency_ms=latency_ms,
     )
-    return PipelineResult(content=final_text, routed_to=routed_to, trace_id=trace_id)
+    return PipelineResult(content=final_text_redacted, routed_to=routed_to, trace_id=trace_id)
