@@ -26,10 +26,10 @@ class DocChunk:
 
 
 def _embed_query(query: str) -> list[float]:
-    """Embed query text using the same model as ingest (task_type=RETRIEVAL_QUERY)."""
+    """Embed query text using gemini-embedding-001 (task_type=RETRIEVAL_QUERY)."""
     client = genai.Client(api_key=settings.google_api_key)
     response = client.models.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         contents=query,
         config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
     )

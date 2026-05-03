@@ -106,10 +106,10 @@ def _make_chunk_id(file_path: Path, index: int) -> str:
 
 
 def _embed_texts(texts: list[str], task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]]:
-    """Embed a batch of texts using Google text-embedding-004 (google.genai SDK)."""
+    """Embed a batch of texts using Google gemini-embedding-001."""
     client = genai.Client(api_key=settings.google_api_key)
     response = client.models.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         contents=texts,
         config=genai_types.EmbedContentConfig(task_type=task_type),
     )
